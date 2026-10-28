@@ -2,8 +2,36 @@
 
 import click
 
+ENV_VARS = [
+    ("OCGC_DB_PATH", "Path to the OpenCode database (highest priority)"),
+    ("OPENCODE_DB", "opencode's own DB override; relative values resolve against the data dir"),
+    ("XDG_DATA_HOME", "Base of the default data dir ($XDG_DATA_HOME/opencode)"),
+    ("OCGC_SCHEMA", "Default for --schema (auto, v1, v2)"),
+    ("OCGC_SKIP_RUNNING_CHECK", 'Skip the "is opencode running?" check'),
+]
 
-@click.group()
+
+class OcgcGroup(click.Group):
+    """Group whose --help also lists every subcommand's options and the env vars."""
+
+    def format_epilog(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        for name in self.list_commands(ctx):
+            cmd = self.get_command(ctx, name)
+            if cmd is None or cmd.hidden:
+                continue
+            sub_ctx = click.Context(cmd, info_name=name, parent=ctx)
+            rows = [rv for p in cmd.get_params(sub_ctx) if (rv := p.get_help_record(sub_ctx)) is not None]
+            rows = [r for r in rows if not r[0].startswith("--help")]
+            if not rows:
+                continue
+            with formatter.section(f"{name.capitalize()} options (ocgc {name} ...)"):
+                formatter.write_dl(rows)
+        with formatter.section("Environment variables"):
+            formatter.write_dl(ENV_VARS)
+        super().format_epilog(ctx, formatter)
+
+
+@click.group(cls=OcgcGroup, epilog="Run 'ocgc COMMAND --help' for details on a single command.")
 @click.version_option(package_name="ocgc", prog_name="ocgc")
 @click.option(
     "--schema",
@@ -40,7 +68,7 @@ def sessions(sort_by: str, limit: int | None) -> None:
     run_sessions(sort_by=sort_by, limit=limit)
 
 
-@cli.command()
+@cli.command(short_help="Deep analysis: biggest sessions, part types, growth rate.")
 def analyze() -> None:
     """Deep analysis: biggest sessions, part type breakdown, growth rate."""
     from ocgc.analyzer import run_analyze
@@ -48,7 +76,11 @@ def analyze() -> None:
     run_analyze()
 
 
-@cli.command()
+@cli.command(
+    epilog="Filters combine with AND. --strip-* flags remove only those parts from matching sessions (all "
+    "sessions if no filter is given) instead of deleting sessions. --clean-* flags run independently before "
+    "any session purge."
+)
 @click.option("--older-than", default=None, help="Delete sessions older than duration (e.g., 15m, 1h, 7d, 2w, 3mo)")
 @click.option("--subagents", is_flag=True, default=False, help="Delete subagent sessions (parent_id IS NOT NULL)")
 @click.option("--larger-than", default=None, help="Delete sessions larger than size (e.g., 50M, 1G)")
