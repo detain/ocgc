@@ -13,14 +13,17 @@ def run_status() -> None:
     db_info = db.get_db_info()
     try:
         conn = db.connect(readonly=True)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, db.SchemaError) as e:
         import click
 
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from None
     try:
+        schema = db.get_schema(conn)
         root_count, sub_count = db.get_session_count(conn)
         part_stats = db.get_part_type_stats(conn)
+        blob_count, blob_bytes = db.get_blob_total(conn)
+        legacy = db.get_legacy_stats(conn)
         event_stats = db.get_event_type_stats(conn)
         _, message_bytes = db.get_message_total(conn)
         orphan_event_count, orphan_event_bytes = db.get_orphan_event_stats(conn)
@@ -30,6 +33,7 @@ def run_status() -> None:
         fs_stats = db.get_filesystem_stats()
         print_status(
             db_info,
+            schema,
             root_count,
             sub_count,
             part_stats,
@@ -40,6 +44,9 @@ def run_status() -> None:
             db_health,
             age_dist,
             fs_stats,
+            blob_count=blob_count,
+            blob_bytes=blob_bytes,
+            legacy=legacy,
         )
     finally:
         conn.close()
@@ -52,7 +59,7 @@ def run_sessions(sort_by: str = "size", limit: int | None = None) -> None:
 
     try:
         conn = db.connect(readonly=True)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, db.SchemaError) as e:
         import click
 
         click.echo(f"Error: {e}", err=True)
@@ -76,7 +83,7 @@ def run_analyze() -> None:
 
     try:
         conn = db.connect(readonly=True)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, db.SchemaError) as e:
         import click
 
         click.echo(f"Error: {e}", err=True)
@@ -98,6 +105,7 @@ def run_analyze() -> None:
         fs_stats = db.get_filesystem_stats()
         orphans = db.get_orphan_session_diffs(conn)
         orphan_event_count, orphan_event_bytes = db.get_orphan_event_stats(conn)
+        legacy = db.get_legacy_stats(conn)
         print_analysis(
             top_sessions=top_sessions,
             avg_size=avg_size,
@@ -111,6 +119,7 @@ def run_analyze() -> None:
             event_total_bytes=event_total_bytes,
             orphan_event_count=orphan_event_count,
             orphan_event_bytes=orphan_event_bytes,
+            legacy=legacy,
         )
     finally:
         conn.close()

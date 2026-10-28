@@ -7,7 +7,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from ocgc.db import DBHealth, DBInfo, EventTypeStats, FilesystemStats, PartTypeStats, SessionRow
+from ocgc.db import DBHealth, DBInfo, EventTypeStats, FilesystemStats, PartTypeStats, SchemaInfo, SessionRow
 
 console = Console()
 
@@ -30,6 +30,11 @@ PART_TYPE_COLORS = {
     "patch": "yellow",
     "file": "white",
     "compaction": "dim white",
+    # v2 session_message row types (assistant rows are broken down by content item)
+    "user": "bright_green",
+    "synthetic": "bright_blue",
+    "system": "bright_cyan",
+    "assistant-meta": "bright_magenta",
 }
 
 EVENT_TYPE_COLORS = {
@@ -129,6 +134,7 @@ def _type_breakdown_table(
 
 def print_status(
     db_info: DBInfo,
+    schema: SchemaInfo,
     root_count: int,
     sub_count: int,
     part_stats: list[PartTypeStats],
@@ -139,24 +145,38 @@ def print_status(
     db_health: DBHealth,
     age_dist: dict[str, int],
     fs_stats: FilesystemStats,
+    blob_count: int = 0,
+    blob_bytes: int = 0,
+    legacy: dict[str, int] | None = None,
 ) -> None:
     part_total = sum(s.size_bytes for s in part_stats)
     event_total = sum(s.size_bytes for s in event_stats)
+    # v1 content lives in the part table; v2 message rows carry their content inline
+    content_label = {"v1": "Parts", "v2": "Messages"}.get(schema.mode, "Content")
 
     # --- Header panel ---
     header = Table.grid(padding=(0, 2))
     header.add_column(style=C_DIM, justify="right")
     header.add_column(style=C_VALUE)
     header.add_row("Database", str(db_info.path))
+    header.add_row("Schema", schema.label)
     header.add_row("DB size", format_bytes(db_info.db_size))
     header.add_row("WAL size", format_bytes(db_info.wal_size))
     header.add_row("Total DB", f"[bold]{format_bytes(db_info.total_size)}[/]")
-    header.add_row("  Parts", format_bytes(part_total))
+    header.add_row(f"  {content_label}", format_bytes(part_total))
     if event_stats:
         ev_style = C_DANGER if event_total > part_total else C_VALUE
         header.add_row("  Events", f"[{ev_style}]{format_bytes(event_total)}[/]")
     if message_bytes > 0:
-        header.add_row("  Messages", format_bytes(message_bytes))
+        header.add_row("  Messages" if schema.mode == "v1" else "  v1 messages", format_bytes(message_bytes))
+    if blob_count > 0:
+        header.add_row("  Blobs", f"{format_bytes(blob_bytes)}  ({blob_count:,} attachments)")
+    if legacy is not None and legacy["total_bytes"] > 0:
+        header.add_row(
+            "  Stale v1 data",
+            f"[{C_DANGER}]{format_bytes(legacy['total_bytes'])}[/] "
+            f"[dim]({legacy['session_count']:,} migrated sessions — 'ocgc purge --clean-legacy')[/]",
+        )
     if db_health.reclaimable_bytes > 0:
         header.add_row(
             "  Reclaimable",
@@ -183,7 +203,8 @@ def print_status(
         return
 
     if part_stats:
-        console.print(_type_breakdown_table("Storage by Part Type", part_stats, PART_TYPE_COLORS))
+        title = "Storage by Part Type" if schema.mode == "v1" else "Storage by Message / Content Type"
+        console.print(_type_breakdown_table(title, part_stats, PART_TYPE_COLORS))
 
     if event_stats:
         console.print(_type_breakdown_table("Storage by Event Type", event_stats, EVENT_TYPE_COLORS))
@@ -265,6 +286,7 @@ def print_analysis(
     event_total_bytes: int,
     orphan_event_count: int,
     orphan_event_bytes: int,
+    legacy: dict[str, int] | None = None,
 ) -> None:
     # --- Top sessions ---
     top_table = Table(
@@ -296,7 +318,7 @@ def print_analysis(
     summary.add_column(style=C_VALUE)
     summary.add_row("Total sessions", str(total_sessions))
     total_part_bytes = sum(s.size_bytes for s in root_stats) + sum(s.size_bytes for s in sub_stats)
-    summary.add_row("Total part data", format_bytes(total_part_bytes))
+    summary.add_row("Total content data", format_bytes(total_part_bytes))
     if event_total_bytes > 0:
         ev_style = C_DANGER if event_total_bytes > total_part_bytes else C_VALUE
         summary.add_row("Total event data", f"[{ev_style}]{format_bytes(event_total_bytes)}[/]")
@@ -314,6 +336,9 @@ def print_analysis(
     if orphan_event_count > 0:
         orphan_ev = f"{orphan_event_count:,} rows ({format_bytes(orphan_event_bytes)})"
         summary.add_row("Orphan events", f"[{C_WARN}]{orphan_ev}[/]")
+    if legacy is not None and legacy["total_bytes"] > 0:
+        stale = f"{legacy['session_count']:,} sessions ({format_bytes(legacy['total_bytes'])})"
+        summary.add_row("Stale v1 data", f"[{C_DANGER}]{stale}[/] [dim]--clean-legacy[/]")
 
     console.print(Panel(summary, title="[bold cyan]Summary[/]", border_style="cyan"))
 
@@ -326,7 +351,7 @@ def print_analysis(
         padding=(0, 1),
     )
     comp_table.add_column("Category", style="bold")
-    comp_table.add_column("Parts", justify="right")
+    comp_table.add_column("Items", justify="right")
     comp_table.add_column("Size", justify="right")
 
     root_total = sum(s.size_bytes for s in root_stats)
@@ -357,12 +382,15 @@ def print_purge_summary(
     grid.add_column(style=C_VALUE)
     grid.add_row("Sessions", str(summary["session_count"]))
     grid.add_row("Messages", f"{summary['message_count']:,}")
-    grid.add_row("Parts", f"{summary['part_count']:,}")
+    if summary.get("part_count", 0) > 0:
+        grid.add_row("Parts", f"{summary['part_count']:,}")
     if summary.get("event_count", 0) > 0:
         grid.add_row("Events", f"{summary['event_count']:,}")
     grid.add_row("Data size", format_bytes(summary["total_bytes"]))
     if summary.get("event_bytes", 0) > 0:
         grid.add_row("  incl. events", f"[{C_DANGER}]{format_bytes(summary['event_bytes'])}[/]")
+    if summary.get("blob_bytes", 0) > 0:
+        grid.add_row("  incl. blobs", format_bytes(summary["blob_bytes"]))
     if diff_files > 0:
         grid.add_row("Session diffs", f"{diff_files} file(s) ({format_bytes(diff_bytes)})")
 
@@ -431,3 +459,18 @@ def print_vacuum_result(before: int, after: int) -> None:
     grid.add_row("Saved", f"[{C_SUCCESS}]{format_bytes(saved)}[/]" if saved > 0 else format_bytes(saved))
 
     console.print(Panel(grid, title="[bold cyan]Vacuum Complete[/]", border_style="cyan"))
+
+
+def print_legacy_summary(stats: dict[str, int], dry_run: bool = False) -> None:
+    label = "[bold yellow]Dry Run — Stale v1 data to delete[/]" if dry_run else "[bold red]Clean Legacy v1 Data[/]"
+    border = "yellow" if dry_run else "red"
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style=C_DIM, justify="right")
+    grid.add_column(style=C_VALUE)
+    grid.add_row("v1 sessions", f"{stats['session_count']:,}")
+    grid.add_row("v1 messages", f"{stats['message_count']:,}")
+    grid.add_row("v1 parts", f"{stats['part_count']:,}")
+    grid.add_row("Data size", format_bytes(stats["total_bytes"]))
+
+    console.print(Panel(grid, title=label, border_style=border))

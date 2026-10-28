@@ -5,11 +5,21 @@ import click
 
 @click.group()
 @click.version_option(package_name="ocgc", prog_name="ocgc")
-def cli() -> None:
+@click.option(
+    "--schema",
+    type=click.Choice(["auto", "v1", "v2"]),
+    default=None,
+    help="Force the DB schema: v1 (opencode 1.x), v2 (opencode 2.x) or auto-detect (default; env OCGC_SCHEMA).",
+)
+def cli(schema: str | None) -> None:
     """ocgc - OpenCode Garbage Collector.
 
     Analyze and reclaim storage used by OpenCode sessions, diffs, and snapshots.
+    Works with both opencode 1.x (v1) and 2.x (v2) databases.
     """
+    from ocgc import db
+
+    db.set_schema_override(schema)
 
 
 @cli.command()
@@ -45,6 +55,13 @@ def analyze() -> None:
 @click.option("--strip-reasoning", is_flag=True, default=False, help="Remove reasoning parts only (keeps sessions)")
 @click.option("--strip-tools", is_flag=True, default=False, help="Remove tool-call parts only (keeps sessions)")
 @click.option("--strip-events", is_flag=True, default=False, help="Remove event-log rows only (keeps sessions)")
+@click.option(
+    "--legacy",
+    is_flag=True,
+    default=False,
+    help="Only target v1 (opencode 1.x) sessions in the v1 tables; on a migrated v2 DB these are the stale "
+    "pre-migration copies. Combines with the other filters and --strip-* (alone: all v1 sessions).",
+)
 @click.option("--session", "session_ids", multiple=True, help="Delete specific session by ID (repeatable)")
 @click.option("--keep-latest", type=int, default=None, help="Keep N most recent sessions, delete the rest")
 @click.option("--clean-snapshots", is_flag=True, default=False, help="Delete all snapshot directories")
@@ -60,6 +77,12 @@ def analyze() -> None:
     default=False,
     help="Delete event rows whose session no longer exists",
 )
+@click.option(
+    "--clean-legacy",
+    is_flag=True,
+    default=False,
+    help="Delete stale v1 session/message/part rows left behind after opencode 2.x's v1->v2 migration",
+)
 @click.option("--dry-run", "-n", is_flag=True, default=False, help="Show what would be deleted without doing it")
 @click.option("--force", "-f", is_flag=True, default=False, help="Skip confirmation prompt")
 def purge(
@@ -69,11 +92,13 @@ def purge(
     strip_reasoning: bool,
     strip_tools: bool,
     strip_events: bool,
+    legacy: bool,
     session_ids: tuple[str, ...],
     keep_latest: int | None,
     clean_snapshots: bool,
     clean_orphans: bool,
     clean_orphan_events: bool,
+    clean_legacy: bool,
     dry_run: bool,
     force: bool,
 ) -> None:
@@ -81,6 +106,7 @@ def purge(
     if keep_latest is not None and keep_latest < 0:
         raise click.BadParameter("must be a non-negative integer", param_hint="'--keep-latest'")
     from ocgc.purger import (
+        run_clean_legacy,
         run_clean_orphan_events,
         run_clean_orphans,
         run_clean_snapshots,
@@ -97,6 +123,9 @@ def purge(
     if clean_orphan_events:
         run_clean_orphan_events(dry_run=dry_run, force=force)
         ran_cleaner = True
+    if clean_legacy:
+        run_clean_legacy(dry_run=dry_run, force=force)
+        ran_cleaner = True
 
     wants_purge = bool(
         older_than
@@ -107,6 +136,7 @@ def purge(
         or strip_reasoning
         or strip_tools
         or strip_events
+        or legacy
     )
     if ran_cleaner and not wants_purge:
         return
@@ -122,6 +152,7 @@ def purge(
         keep_latest=keep_latest,
         dry_run=dry_run,
         force=force,
+        legacy=legacy,
     )
 
 

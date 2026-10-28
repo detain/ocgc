@@ -15,6 +15,7 @@ from ocgc.display import (
     console,
     format_bytes,
     print_event_strip_summary,
+    print_legacy_summary,
     print_orphan_events_summary,
     print_purge_summary,
     print_reasoning_summary,
@@ -58,18 +59,28 @@ def run_purge(
     keep_latest: int | None,
     dry_run: bool,
     force: bool,
+    legacy: bool = False,
 ) -> None:
+    if legacy:
+        # Restrict every filter/action to the v1 tables. On a migrated v2 DB those are the
+        # stale pre-migration copies; live session_v2 data is never touched.
+        if db.get_schema_override() == "v2":
+            console.print("[red]Error:[/] --legacy targets the v1 tables and cannot be combined with --schema v2.")
+            raise SystemExit(1)
+        db.set_schema_override("v1")
+
     if db.check_opencode_running():
         warn_opencode_running()
         if not dry_run and not force and not click.confirm("opencode is running. Continue anyway?"):
             return
 
-    has_filter = bool(older_than or subagents or larger_than or session_ids or keep_latest is not None)
+    # --legacy alone selects every v1 session (so "--legacy --strip-events" = strip events from all v1 sessions)
+    has_filter = bool(older_than or subagents or larger_than or session_ids or keep_latest is not None or legacy)
     is_strip = strip_reasoning or strip_tools or strip_events
     if not has_filter and not is_strip:
         console.print("[red]Error:[/] At least one purge flag is required.")
         console.print(
-            "Use --older-than, --subagents, --larger-than, --session, --keep-latest, "
+            "Use --older-than, --subagents, --larger-than, --session, --keep-latest, --legacy, "
             "--strip-reasoning, --strip-tools, or --strip-events"
         )
         raise SystemExit(1)
@@ -88,7 +99,7 @@ def run_purge(
 
     try:
         conn = db.connect(readonly=True)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, db.SchemaError) as e:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from None
     try:
@@ -105,6 +116,8 @@ def run_purge(
             if not target_ids:
                 console.print("[dim]No sessions match the given criteria.[/]")
                 return
+            if legacy:
+                console.print(f"[dim]--legacy: targeting {len(target_ids):,} v1 session(s) in the v1 tables only.[/]")
 
         if is_strip:
             if strip_reasoning:
@@ -118,7 +131,7 @@ def run_purge(
             purge_summary = db.get_purge_summary(conn, target_ids)
             diff_dir = db.get_storage_dir() / "storage" / "session_diff"
             if diff_dir.is_dir():
-                for sid in target_ids:
+                for sid in db.get_shared_purge_ids(conn, target_ids):
                     p = diff_dir / f"{sid}.json"
                     if p.exists():
                         diff_files += 1
@@ -146,7 +159,8 @@ def run_purge(
     if dry_run:
         return
 
-    scope = "ALL sessions" if target_ids is None else f"{len(target_ids)} session(s)"
+    kind = "v1 " if legacy else ""
+    scope = "ALL sessions" if target_ids is None else f"{len(target_ids)} {kind}session(s)"
     if not force:
         if is_strip:
             actions = [
@@ -165,7 +179,7 @@ def run_purge(
 
     try:
         conn = db.connect(readonly=False)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, db.SchemaError) as e:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from None
     try:
@@ -213,6 +227,9 @@ def run_vacuum(force: bool = False) -> None:
     with console.status("[bold cyan]Running VACUUM...[/]"):
         try:
             before, after = db.vacuum_db()
+        except db.SchemaError as e:
+            console.print(f"[red]Error:[/] {e}")
+            raise SystemExit(1) from None
         except sqlite3.OperationalError as e:
             err_msg = str(e).lower()
             if "locked" in err_msg or "busy" in err_msg:
@@ -261,7 +278,7 @@ def run_clean_snapshots(dry_run: bool, force: bool) -> None:
 def run_clean_orphans(dry_run: bool, force: bool) -> None:
     try:
         conn = db.connect(readonly=True)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, db.SchemaError) as e:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from None
     try:
@@ -298,7 +315,7 @@ def run_clean_orphans(dry_run: bool, force: bool) -> None:
 def run_clean_orphan_events(dry_run: bool, force: bool) -> None:
     try:
         conn = db.connect(readonly=True)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, db.SchemaError) as e:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from None
     try:
@@ -326,4 +343,56 @@ def run_clean_orphan_events(dry_run: bool, force: bool) -> None:
 
     freed = format_bytes(result["bytes_freed"])
     console.print(f"[green]Deleted {result['event_count']:,} orphan event(s), freed {freed}.[/]")
+    console.print("[dim]Run 'ocgc vacuum' to reclaim disk space.[/]")
+
+
+def run_clean_legacy(dry_run: bool, force: bool) -> None:
+    """Empty the stale v1 tables left behind by opencode 2.x's v1->v2 migration."""
+    try:
+        conn = db.connect(readonly=True)
+    except (FileNotFoundError, db.SchemaError) as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from None
+    try:
+        schema = db.get_schema(conn)
+        stats = db.get_legacy_stats(conn)
+    finally:
+        conn.close()
+
+    if stats is None:
+        if schema.has_v1 and schema.has_v2:
+            console.print(
+                "[yellow]v1 tables still hold unmigrated sessions[/] (the v1->v2 migration has not completed). "
+                "Start opencode 2.x to finish migrating before cleaning them."
+            )
+        else:
+            console.print("[dim]No stale v1 data found.[/]")
+        return
+    if stats["session_count"] == 0 and stats["total_bytes"] == 0:
+        console.print("[dim]No stale v1 data found.[/]")
+        return
+
+    print_legacy_summary(stats, dry_run=dry_run)
+
+    if dry_run:
+        return
+
+    if db.check_opencode_running():
+        warn_opencode_running()
+    if not force:
+        console.print(
+            "[yellow]Warning:[/] opencode 2.x has already copied these sessions into session_v2 and no longer "
+            "reads them, but downgrading to opencode 1.x afterwards will show no history."
+        )
+        if not click.confirm(f"Delete {stats['session_count']:,} stale v1 session(s) and their messages/parts?"):
+            return
+
+    conn = db.connect(readonly=False)
+    try:
+        with console.status("[bold cyan]Deleting stale v1 rows...[/]"):
+            db.purge_legacy(conn)
+    finally:
+        conn.close()
+
+    console.print(f"[green]Deleted stale v1 data, freed ~{format_bytes(stats['total_bytes'])}.[/]")
     console.print("[dim]Run 'ocgc vacuum' to reclaim disk space.[/]")
