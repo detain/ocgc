@@ -56,6 +56,12 @@ def analyze() -> None:
 @click.option("--strip-tools", is_flag=True, default=False, help="Remove tool-call parts only (keeps sessions)")
 @click.option("--strip-events", is_flag=True, default=False, help="Remove event-log rows only (keeps sessions)")
 @click.option(
+    "--strip-diffs",
+    is_flag=True,
+    default=False,
+    help="Delete session diff files (storage/session_diff/*.json) only (keeps sessions)",
+)
+@click.option(
     "--legacy",
     is_flag=True,
     default=False,
@@ -92,6 +98,7 @@ def purge(
     strip_reasoning: bool,
     strip_tools: bool,
     strip_events: bool,
+    strip_diffs: bool,
     legacy: bool,
     session_ids: tuple[str, ...],
     keep_latest: int | None,
@@ -136,6 +143,7 @@ def purge(
         or strip_reasoning
         or strip_tools
         or strip_events
+        or strip_diffs
         or legacy
     )
     if ran_cleaner and not wants_purge:
@@ -148,6 +156,7 @@ def purge(
         strip_reasoning=strip_reasoning,
         strip_tools=strip_tools,
         strip_events=strip_events,
+        strip_diffs=strip_diffs,
         session_ids=session_ids,
         keep_latest=keep_latest,
         dry_run=dry_run,

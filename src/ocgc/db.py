@@ -1104,6 +1104,44 @@ def purge_session_diffs(session_ids: list[str]) -> PurgeFilesResult:
     return result
 
 
+def _session_diff_paths(conn: sqlite3.Connection, session_ids: list[str] | None) -> list[Path]:
+    """Existing session_diff files for the given sessions (or every file if None).
+
+    Ids still live in session_v2 are skipped in v1-only mode (see get_shared_purge_ids).
+    """
+    diff_dir = get_storage_dir() / "storage" / "session_diff"
+    if not diff_dir.is_dir():
+        return []
+    if session_ids is None:
+        return list(diff_dir.glob("*.json"))
+    paths = (diff_dir / f"{sid}.json" for sid in get_shared_purge_ids(conn, session_ids))
+    return [p for p in paths if p.exists()]
+
+
+def get_diff_summary(conn: sqlite3.Connection, session_ids: list[str] | None = None) -> dict[str, int]:
+    """Count and size of session_diff files for given sessions (or all)."""
+    paths = _session_diff_paths(conn, session_ids)
+    return {"file_count": len(paths), "total_bytes": sum(p.stat().st_size for p in paths)}
+
+
+def strip_diffs(conn: sqlite3.Connection, session_ids: list[str] | None = None) -> PurgeFilesResult:
+    """Delete session_diff files for given sessions (or all), keeping the sessions. Best-effort.
+
+    These hold the per-session file diffs opencode shows in its review panel; the
+    conversation itself lives in the DB, so dropping them only loses that view.
+    """
+    result = PurgeFilesResult()
+    for path in _session_diff_paths(conn, session_ids):
+        try:
+            size = path.stat().st_size
+            path.unlink()
+            result.files_deleted += 1
+            result.bytes_freed += size
+        except FileNotFoundError:
+            pass
+    return result
+
+
 def get_orphan_session_diffs(conn: sqlite3.Connection) -> list[OrphanDiff]:
     """Find session_diff files that have no matching session in DB."""
     diff_dir = get_storage_dir() / "storage" / "session_diff"

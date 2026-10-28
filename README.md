@@ -73,6 +73,11 @@ ocgc purge --strip-events
 # Strip events from just the old sessions
 ocgc purge --strip-events --older-than 30d
 
+# Delete session diff files (storage/session_diff/*.json) only — keeps sessions,
+# frees disk immediately (no vacuum needed)
+ocgc purge --strip-diffs
+ocgc purge --strip-diffs --older-than 30d
+
 # Other purge options
 ocgc purge --larger-than 50M
 ocgc purge --keep-latest 50
@@ -117,6 +122,7 @@ ocgc vacuum
 | `--strip-reasoning` | Remove reasoning parts (v1 `part` rows / v2 assistant `content` items), keep sessions |
 | `--strip-tools` | Remove tool-call parts (v1 `part` rows / v2 assistant `content` items), keep sessions |
 | `--strip-events` | Remove event-log rows, keep sessions |
+| `--strip-diffs` | Delete session diff files (`storage/session_diff/<id>.json`), keep sessions. With no filter, deletes every diff file (orphans included) |
 | `--clean-orphans` | Delete session diff files with no matching session |
 | `--clean-orphan-events` | Delete event rows whose session no longer exists |
 | `--clean-snapshots` | Delete all snapshot directories |
@@ -124,7 +130,7 @@ ocgc vacuum
 | `--dry-run`, `-n` | Show what would be deleted without doing it |
 | `--force`, `-f` | Skip the confirmation prompt |
 
-Multiple purge flags combine with AND. `--strip-reasoning`, `--strip-tools`, and `--strip-events` change the action from deleting sessions to removing just those rows (from matching sessions, or all sessions if no other filters are given), and can be combined. `--clean-orphans`, `--clean-orphan-events`, `--clean-snapshots`, and `--clean-legacy` run independently before any session purge. `--dry-run` previews without touching anything. `--force` skips the confirmation prompt.
+Multiple purge flags combine with AND. `--strip-reasoning`, `--strip-tools`, `--strip-events`, and `--strip-diffs` change the action from deleting sessions to removing just those rows (or diff files) (from matching sessions, or all sessions if no other filters are given), and can be combined. `--clean-orphans`, `--clean-orphan-events`, `--clean-snapshots`, and `--clean-legacy` run independently before any session purge. `--dry-run` previews without touching anything. `--force` skips the confirmation prompt.
 
 Stripping the event log leaves `event_sequence` intact, so OpenCode keeps appending cleanly to sessions you continue using. Deleting a session (session purge) now also removes its event rows, which upstream ocgc left orphaned — run `--clean-orphan-events` once to sweep up any left over from earlier purges.
 
@@ -148,13 +154,13 @@ What changes with v2:
 - **`--strip-reasoning` / `--strip-tools`** rewrite assistant rows and drop the matching `content` items, because v2 has no separate part rows.
 - **Session purge** also clears `session_message`, `session_inbox`, `instruction_entry`, `instruction_state` and `blob_ref`. Blobs are deleted once no other session references them. The session's stale v1 copy is deleted too.
 - **Stale v1 data.** After the migration, the old v1 tables stay in the file but opencode 2.x never reads them again, and sessions deleted in v2 still linger there. This is frequently the biggest consumer of space. `status` and `analyze` report it as "Stale v1 data". `ocgc purge --clean-legacy` empties those tables (it keeps the tables themselves, so opencode's own schema migrations keep working). It refuses while the migration is still incomplete. After cleaning, downgrading to opencode 1.x shows no history.
-- **`--legacy` filter.** Use it to clean only part of the v1 data, e.g. strip just the events or tool output of old v1 sessions. On a v2 DB it only deletes event rows and diff files for ids that are no longer live v2 sessions; `--strip-events` combined with it strips events for every selected id.
+- **`--legacy` filter.** Use it to clean only part of the v1 data, e.g. strip just the events or tool output of old v1 sessions. On a v2 DB it only deletes event rows and diff files for ids that are no longer live v2 sessions; `--strip-events` combined with it strips events for every selected id; `--strip-diffs` combined with it still skips diff files of ids that are live v2 sessions.
 
 ## Filesystem storage
 
 Beyond the SQLite database, OpenCode stores data on the filesystem:
 
-- Session diffs (`~/.local/share/opencode/storage/session_diff/`): one JSON file per session containing full file contents. Cleaned automatically when sessions are purged.
+- Session diffs (`~/.local/share/opencode/storage/session_diff/`): one JSON file per session containing full file contents. Cleaned automatically when sessions are purged. Use `--strip-diffs` to delete them while keeping the sessions (opencode only loses the per-session file-changes view; the conversation is untouched), or `--clean-orphans` to delete only those with no matching session.
 - Snapshots (`~/.local/share/opencode/snapshot/`): git object packs for each project. Use `--clean-snapshots` to delete.
 - Tool output (`~/.local/share/opencode/tool-output/`): small files from tool invocations. Shown in stats but no cleanup needed.
 

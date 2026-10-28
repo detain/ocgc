@@ -436,6 +436,19 @@ def print_event_strip_summary(summary: dict[str, int], dry_run: bool = False) ->
     console.print(Panel(grid, title=label, border_style=border))
 
 
+def print_diff_strip_summary(summary: dict[str, int], dry_run: bool = False) -> None:
+    label = "[bold yellow]Dry Run — Session diffs to strip[/]" if dry_run else "[bold red]Strip Session Diffs[/]"
+    border = "yellow" if dry_run else "red"
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style=C_DIM, justify="right")
+    grid.add_column(style=C_VALUE)
+    grid.add_row("Diff files", f"{summary['file_count']:,}")
+    grid.add_row("Data size", format_bytes(summary["total_bytes"]))
+
+    console.print(Panel(grid, title=label, border_style=border))
+
+
 def print_orphan_events_summary(count: int, size_bytes: int, dry_run: bool = False) -> None:
     label = "[bold yellow]Dry Run — Orphan events to delete[/]" if dry_run else "[bold red]Clean Orphan Events[/]"
     border = "yellow" if dry_run else "red"

@@ -14,6 +14,7 @@ from ocgc.display import (
     C_VALUE,
     console,
     format_bytes,
+    print_diff_strip_summary,
     print_event_strip_summary,
     print_legacy_summary,
     print_orphan_events_summary,
@@ -55,6 +56,7 @@ def run_purge(
     strip_reasoning: bool,
     strip_tools: bool,
     strip_events: bool,
+    strip_diffs: bool,
     session_ids: tuple[str, ...],
     keep_latest: int | None,
     dry_run: bool,
@@ -76,12 +78,12 @@ def run_purge(
 
     # --legacy alone selects every v1 session (so "--legacy --strip-events" = strip events from all v1 sessions)
     has_filter = bool(older_than or subagents or larger_than or session_ids or keep_latest is not None or legacy)
-    is_strip = strip_reasoning or strip_tools or strip_events
+    is_strip = strip_reasoning or strip_tools or strip_events or strip_diffs
     if not has_filter and not is_strip:
         console.print("[red]Error:[/] At least one purge flag is required.")
         console.print(
             "Use --older-than, --subagents, --larger-than, --session, --keep-latest, --legacy, "
-            "--strip-reasoning, --strip-tools, or --strip-events"
+            "--strip-reasoning, --strip-tools, --strip-events, or --strip-diffs"
         )
         raise SystemExit(1)
 
@@ -92,6 +94,7 @@ def run_purge(
     reasoning_summary: dict[str, int] | None = None
     tools_summary: dict[str, int] | None = None
     event_summary: dict[str, int] | None = None
+    diff_summary: dict[str, int] | None = None
     purge_summary: dict[str, int] = {}
     diff_files = 0
     diff_bytes = 0
@@ -126,16 +129,13 @@ def run_purge(
                 tools_summary = db.get_tools_summary(conn, target_ids)
             if strip_events:
                 event_summary = db.get_event_summary(conn, target_ids)
+            if strip_diffs:
+                diff_summary = db.get_diff_summary(conn, target_ids)
         else:
             assert target_ids is not None, "delete mode requires a session filter"
             purge_summary = db.get_purge_summary(conn, target_ids)
-            diff_dir = db.get_storage_dir() / "storage" / "session_diff"
-            if diff_dir.is_dir():
-                for sid in db.get_shared_purge_ids(conn, target_ids):
-                    p = diff_dir / f"{sid}.json"
-                    if p.exists():
-                        diff_files += 1
-                        diff_bytes += p.stat().st_size
+            files = db.get_diff_summary(conn, target_ids)
+            diff_files, diff_bytes = files["file_count"], files["total_bytes"]
     finally:
         conn.close()
 
@@ -149,6 +149,9 @@ def run_purge(
             has_work = True
         if event_summary is not None and event_summary["event_count"] > 0:
             print_event_strip_summary(event_summary, dry_run=dry_run)
+            has_work = True
+        if diff_summary is not None and diff_summary["file_count"] > 0:
+            print_diff_strip_summary(diff_summary, dry_run=dry_run)
             has_work = True
         if not has_work:
             console.print("[dim]Nothing to strip in the matching sessions.[/]")
@@ -169,6 +172,7 @@ def run_purge(
                     ("reasoning", strip_reasoning),
                     ("tools", strip_tools),
                     ("events", strip_events),
+                    ("session diffs", strip_diffs),
                 )
                 if on
             ]
@@ -193,6 +197,10 @@ def run_purge(
             if strip_events:
                 count = db.strip_events(conn, target_ids)
                 console.print(f"[green]Deleted {count:,} event rows.[/]")
+            if strip_diffs:
+                result = db.strip_diffs(conn, target_ids)
+                freed = format_bytes(result.bytes_freed)
+                console.print(f"[green]Deleted {result.files_deleted:,} session diff file(s), freed {freed}.[/]")
         else:
             files_result = db.purge_sessions(conn, target_ids or [])
             freed = format_bytes(purge_summary["total_bytes"])
@@ -205,7 +213,9 @@ def run_purge(
     finally:
         conn.close()
 
-    console.print("[dim]Run 'ocgc vacuum' to reclaim disk space.[/]")
+    # diff files are freed immediately; only DB row deletes need a VACUUM
+    if not is_strip or strip_reasoning or strip_tools or strip_events:
+        console.print("[dim]Run 'ocgc vacuum' to reclaim disk space.[/]")
 
 
 def run_vacuum(force: bool = False) -> None:
